@@ -11,6 +11,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 from dotenv import load_dotenv
 import threading
 from collections import defaultdict
+import base64
 
 # Load environment variables
 load_dotenv()
@@ -27,8 +28,51 @@ sp = Spotify(client_credentials_manager=SpotifyClientCredentials(
 # Store download progress
 download_progress = defaultdict(dict)
 
-# Cookie file path
-COOKIE_FILE = '/etc/secrets/cookies.txt'
+# Cookie configuration for Render.com
+def setup_cookies():
+    """Setup cookies from Render environment variable"""
+    # Get the cookie file path from environment variable
+    cookie_file_path = os.getenv('COOKIE_FILE')
+    
+    if cookie_file_path and os.path.exists(cookie_file_path):
+        print(f"✅ Cookies found at: {cookie_file_path}")
+        return cookie_file_path
+    
+    # Fallback: Check if cookies are provided as base64 in environment
+    cookies_base64 = os.getenv('YOUTUBE_COOKIES_BASE64')
+    if cookies_base64:
+        try:
+            # Decode base64 cookies
+            cookies_content = base64.b64decode(cookies_base64).decode('utf-8')
+            
+            # Create temporary cookies file
+            temp_cookie_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+            temp_cookie_file.write(cookies_content)
+            temp_cookie_file.close()
+            
+            print(f"✅ Cookies loaded from base64 environment variable to: {temp_cookie_file.name}")
+            return temp_cookie_file.name
+            
+        except Exception as e:
+            print(f"❌ Error decoding cookies from base64: {e}")
+    
+    # Check common paths as last resort
+    common_paths = [
+        '/etc/secrets/cookies.txt',
+        os.path.join(os.getcwd(), 'cookies.txt'),
+        os.path.join(os.getcwd(), 'cookies', 'cookies.txt'),
+    ]
+    
+    for path in common_paths:
+        if os.path.exists(path):
+            print(f"✅ Cookies found at common path: {path}")
+            return path
+    
+    print("❌ No cookies found. YouTube downloads may be limited.")
+    return None
+
+# Global cookie file path
+COOKIE_FILE = setup_cookies()
 
 def extract_spotify_id(url, type):
     """Extract Spotify ID from URL"""
@@ -89,11 +133,11 @@ def download_full_song(track_info, download_id):
         }
         
         # Add cookies if available
-        if os.path.exists(COOKIE_FILE):
-            print(f"Using cookies from: {COOKIE_FILE}")
+        if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+            print(f"🍪 Using cookies from: {COOKIE_FILE}")
             ydl_opts['cookiefile'] = COOKIE_FILE
         else:
-            print("No cookie file found. Using fallback options...")
+            print("⚠️ No cookie file found. Using fallback options...")
             # Fallback options when no cookies are available
             ydl_opts.update({
                 'extract_flat': False,
@@ -109,16 +153,18 @@ def download_full_song(track_info, download_id):
             
             try:
                 # Search and download
+                print(f"🔍 Searching YouTube for: {query}")
                 ydl.download([f"ytsearch:{query}"])
                 download_progress[download_id]['status'] = 'completed'
                 download_progress[download_id]['progress'] = 100
+                print(f"✅ Download completed for: {track_info['name']}")
                 
             except Exception as download_error:
-                print(f"Download error: {download_error}")
+                print(f"❌ Download error: {download_error}")
                 
                 # If download fails, try alternative approach without cookies
                 if 'cookiefile' in ydl_opts:
-                    print("Retrying without cookies...")
+                    print("🔄 Retrying without cookies...")
                     try:
                         # Remove cookies and retry
                         retry_opts = ydl_opts.copy()
@@ -135,8 +181,9 @@ def download_full_song(track_info, download_id):
                             ydl_retry.download([f"ytsearch:{query}"])
                             download_progress[download_id]['status'] = 'completed'
                             download_progress[download_id]['progress'] = 100
+                            print(f"✅ Retry successful for: {track_info['name']}")
                     except Exception as retry_error:
-                        print(f"Retry also failed: {retry_error}")
+                        print(f"❌ Retry also failed: {retry_error}")
                         download_progress[download_id]['status'] = 'error'
                         download_progress[download_id]['error'] = f"Download failed: {str(retry_error)}"
                 else:
@@ -144,7 +191,7 @@ def download_full_song(track_info, download_id):
                     download_progress[download_id]['error'] = f"Download failed: {str(download_error)}"
             
     except Exception as e:
-        print(f"Unexpected error in download_full_song: {e}")
+        print(f"💥 Unexpected error in download_full_song: {e}")
         download_progress[download_id]['status'] = 'error'
         download_progress[download_id]['error'] = f"Unexpected error: {str(e)}"
 
@@ -172,7 +219,8 @@ def index():
             'GET /api/download/progress/<download_id>': 'Check download progress',
             'GET /api/download/file/<download_id>': 'Download completed file'
         },
-        'cookies_status': 'Available' if os.path.exists(COOKIE_FILE) else 'Not found'
+        'cookies_status': 'Available' if COOKIE_FILE and os.path.exists(COOKIE_FILE) else 'Not available',
+        'cookie_file_path': COOKIE_FILE if COOKIE_FILE else 'Not set'
     })
 
 @app.route('/api/fetch', methods=['POST'])
@@ -309,7 +357,7 @@ def download_full_track():
             'track_name': track['name'],
             'artists': [artist['name'] for artist in track['artists']],
             'status': 'started',
-            'cookies_used': os.path.exists(COOKIE_FILE)
+            'cookies_available': COOKIE_FILE and os.path.exists(COOKIE_FILE)
         })
         
     except Exception as e:
