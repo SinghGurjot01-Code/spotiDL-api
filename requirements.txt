@@ -1,7 +1,7 @@
 flask
-flask-cors
 spotipy
-python-dotenv
 requests
+python-dotenv
+flask-cors
+yt-dlp
 gunicorn
-
