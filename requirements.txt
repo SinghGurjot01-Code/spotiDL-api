@@ -1,7 +1,7 @@
-flask
-spotipy
-requests
-python-dotenv
-flask-cors
+
+fastapi
+uvicorn
+ytmusicapi
 yt-dlp
-gunicorn
+aiohttp
+python-multipart
