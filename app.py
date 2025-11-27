@@ -7,6 +7,7 @@ import os
 import time
 import hashlib
 import shutil
+import json
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -23,34 +24,33 @@ app.add_middleware(
 )
 
 # ============================================================
-# READ-ONLY SOURCE (Render Secrets)
+# PATHS
 # ============================================================
-READONLY_COOKIES = "/etc/secrets/cookies.txt"
-
-# ============================================================
-# READ-WRITE DESTINATION
-# ============================================================
-WRITABLE_COOKIES = "/tmp/cookies.txt"
+READONLY_COOKIES = "/etc/secrets/cookies.txt"    # Render secret file
+WRITABLE_COOKIES = "/tmp/cookies.txt"           # Writable location
+AUTH_JSON = "/tmp/ytmusic_auth.json"            # For YTMusic(auth=..)
 
 
-def ensure_writable_cookies():
-    """Copies cookies.txt from read-only location → /tmp/ (writable)."""
+# ============================================================
+# COPY COOKIES TO WRITABLE AREA
+# ============================================================
+def prepare_writable_cookies():
     if not os.path.exists(READONLY_COOKIES):
-        raise RuntimeError("cookies.txt not found in /etc/secrets")
+        raise RuntimeError("cookies.txt missing in /etc/secrets")
 
-    # Copy only once at startup
     if not os.path.exists(WRITABLE_COOKIES):
         shutil.copy(READONLY_COOKIES, WRITABLE_COOKIES)
-        log.info(f"Copied cookies to writable location: {WRITABLE_COOKIES}")
+        log.info(f"Copied cookies to {WRITABLE_COOKIES}")
 
     return WRITABLE_COOKIES
 
 
 # ============================================================
-# AUTH HEADERS (SAPISIDHASH)
+# BUILD SAPISIDHASH → WRITE auth.json
 # ============================================================
-def load_cookie_headers(cookie_file):
+def create_auth_file(cookie_file):
     cookies = {}
+
     with open(cookie_file, "r") as f:
         for line in f:
             if line.startswith("#") or not line.strip():
@@ -64,7 +64,6 @@ def load_cookie_headers(cookie_file):
         or cookies.get("__Secure-1PAPISID")
         or cookies.get("__Secure-3PAPISID")
     )
-
     if not sapisid:
         raise RuntimeError("SAPISID cookie missing")
 
@@ -72,29 +71,37 @@ def load_cookie_headers(cookie_file):
     timestamp = int(time.time())
     sig = hashlib.sha1(f"{timestamp} {sapisid} {origin}".encode()).hexdigest()
 
-    return {
+    headers = {
         "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
         "Authorization": f"SAPISIDHASH {timestamp}_{sig}",
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0"
     }
 
+    # Write JSON for legacy ytmusicapi
+    with open(AUTH_JSON, "w") as f:
+        json.dump(headers, f)
+
+    log.info("Created YTMusic auth JSON")
+
+    return AUTH_JSON
+
 
 # ============================================================
-# INITIALIZE COOKIES + YTMUSIC AUTH
+# INITIALIZE AUTHENTICATED YTMUSIC
 # ============================================================
-cookies_path = ensure_writable_cookies()
-headers = load_cookie_headers(cookies_path)
+cookies_path = prepare_writable_cookies()
+auth_path = create_auth_file(cookies_path)
 
-ytmusic = YTMusic(headers_raw=headers)
-log.info("YTMusic Authenticated Successfully")
+ytmusic = YTMusic(auth=auth_path)
+log.info("YTMusic authenticated successfully.")
 
 
 @app.get("/")
-def root():
+def home():
     return {
         "status": "online",
-        "cookies_path": cookies_path,
-        "cookies_readwrite": True
+        "cookies": cookies_path,
+        "auth_json": auth_path
     }
 
 
@@ -107,11 +114,10 @@ async def search(q: str, limit: int = 20):
         raise HTTPException(400, "Missing ?q")
 
     try:
-        res = ytmusic.search(q, filter="songs", limit=limit)
-        out = []
+        results = ytmusic.search(q, filter="songs", limit=limit)
+        output = []
 
-        for r in res:
-            # convert duration
+        for r in results:
             sec = 0
             if r.get("duration"):
                 t = r["duration"].split(":")
@@ -122,7 +128,7 @@ async def search(q: str, limit: int = 20):
 
             artists = [a["name"] for a in r.get("artists", [])]
 
-            out.append({
+            output.append({
                 "videoId": r.get("videoId", ""),
                 "title": r.get("title", "Unknown"),
                 "artists": ", ".join(artists),
@@ -131,14 +137,14 @@ async def search(q: str, limit: int = 20):
                 "duration_seconds": sec
             })
 
-        return out
+        return output
 
     except Exception as e:
         raise HTTPException(500, f"Search failed: {e}")
 
 
 # ============================================================
-# STREAM (Works for 99.9% of videos)
+# STREAM
 # ============================================================
 @app.get("/stream")
 async def stream(videoId: str):
@@ -149,25 +155,18 @@ async def stream(videoId: str):
 
     ydl_opts = {
         "quiet": True,
-        "no_warnings": True,
         "cookiefile": cookies_path,
+        "no_warnings": True,
         "noplaylist": True,
         "format": (
             "ba[ext=webm][acodec=opus]/"
             "bestaudio/best/"
             "bestaudio[ext=m4a]/"
-            "worstaudio/"
-            "best"
+            "worstaudio/best"
         ),
-        "extractor_args": {"youtube": {"player_client": ["web", "android"]}},
-        # MP3 postprocessor (your request)
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "320",
-            }
-        ],
+        "extractor_args": {
+            "youtube": {"player_client": ["web", "android"]}
+        }
     }
 
     try:
@@ -186,12 +185,12 @@ async def stream(videoId: str):
             raise HTTPException(404, "No audio stream found")
 
         return {
+            "videoId": videoId,
             "stream_url": audio_url,
             "title": info.get("title"),
             "duration": info.get("duration"),
-            "thumbnail": info.get("thumbnail"),
-            "videoId": videoId
+            "thumbnail": info.get("thumbnail")
         }
 
     except Exception as e:
-        raise HTTPException(500, f"Stream error: {e}")
+        raise HTTPException(500, f"Stream failed: {e}")
