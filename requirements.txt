@@ -1,7 +1,6 @@
-
 fastapi
 uvicorn
-ytmusicapi
+ytmusicapi>=1.6.0
 yt-dlp
 aiohttp
 python-multipart
