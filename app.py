@@ -19,8 +19,9 @@ app.add_middleware(
 
 COOKIES_FILE = "/etc/secrets/cookies.txt"
 
+
 # -------------------------------
-# COOKIE PARSER (WORKS 100% ALWAYS)
+# COOKIE PARSER (ALWAYS WORKS)
 # -------------------------------
 def load_cookies_as_headers(cookie_file):
     if not os.path.exists(cookie_file):
@@ -45,7 +46,7 @@ def load_cookies_as_headers(cookie_file):
     )
 
     if not sapisid:
-        raise RuntimeError("No SAPISID cookie found, cannot authenticate YouTube")
+        raise RuntimeError("No SAPISID cookie found")
 
     origin = "https://music.youtube.com"
     timestamp = int(time.time())
@@ -60,8 +61,9 @@ def load_cookies_as_headers(cookie_file):
 
     return headers
 
+
 # -------------------------------
-# INITIALIZE AUTHENTICATED YTMUSIC
+# INIT YTMUSIC
 # -------------------------------
 try:
     headers_raw = load_cookies_as_headers(COOKIES_FILE)
@@ -69,7 +71,7 @@ try:
     print("YTMusic authenticated successfully")
 except Exception as e:
     print("YTMusic authentication failed:", e)
-    ytmusic = YTMusic()  # unauthenticated fallback
+    ytmusic = YTMusic()  # fallback
 
 
 @app.get("/")
@@ -96,7 +98,7 @@ async def search_music(q: str, limit: int = 20):
                 if len(t) == 2:
                     duration_sec = int(t[0]) * 60 + int(t[1])
                 elif len(t) == 3:
-                    duration_sec = int(t[0])*3600 + int(t[1])*60 + int(t[2])
+                    duration_sec = int(t[0]) * 3600 + int(t[1]) * 60 + int(t[2])
 
             artists = [a["name"] for a in r.get("artists", [])]
 
@@ -116,32 +118,29 @@ async def search_music(q: str, limit: int = 20):
 
 
 # -------------------------------
-# STREAM (FIXED)
+# STREAM (FIXED + UPDATED)
 # -------------------------------
 @app.get("/stream")
-async def stream(videoId: str):
+async def stream_music(videoId: str):
     try:
         if not videoId:
             raise HTTPException(400, "videoId is required")
 
-       ydl_opts = {
-    "format": "ba[ext=webm][acodec=opus]/ba/bestaudio/best",
-    "quiet": True,
-    "no_warnings": True,
-    "extractaudio": False,
-    "noplaylist": True,
-    "cookiefile": COOKIES_FILE,
-    "http_headers": {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9",
-    },
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["web", "android"]
+        ydl_opts = {
+            "format": "ba[ext=webm][acodec=opus]/ba/bestaudio/best",
+            "quiet": True,
+            "no_warnings": True,
+            "extractaudio": False,
+            "noplaylist": True,
+            "cookiefile": COOKIES_FILE,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            "extractor_args": {
+                "youtube": {"player_client": ["web", "android"]}
+            },
         }
-    },
-}
-
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(
@@ -149,19 +148,20 @@ async def stream(videoId: str):
                 download=False
             )
 
-        # Extract best audio URL
+        # Extract audio URL
         audio_url = None
 
         if "url" in info:
             audio_url = info["url"]
         else:
             audio_formats = [
-                f for f in info.get("formats", [])
+                f
+                for f in info.get("formats", [])
                 if f.get("acodec") != "none" and f.get("vcodec") == "none"
             ]
             if audio_formats:
                 audio_formats.sort(key=lambda x: x.get("abr", 0), reverse=True)
-                audio_url = audio_formats[0]["url"]
+                audio_url = audio_formats[0].get("url")
 
         if not audio_url:
             raise HTTPException(404, "No audio stream found")
@@ -171,6 +171,7 @@ async def stream(videoId: str):
             "title": info.get("title"),
             "duration": info.get("duration"),
             "thumbnail": info.get("thumbnail"),
+            "videoId": videoId,
         }
 
     except Exception as e:
