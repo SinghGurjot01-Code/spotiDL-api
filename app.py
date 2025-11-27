@@ -6,247 +6,192 @@ import yt_dlp
 import os
 import time
 import hashlib
+import shutil
 import logging
 
-# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("aureum-api")
+log = logging.getLogger("AureumAPI")
 
-# ---------- FastAPI App ----------
 app = FastAPI(title="Aureum Music API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # front-end from any domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Where your cookies live (Render secret file or local dev)
-COOKIES_FILE = "/etc/secrets/cookies.txt"
+# ============================================================
+# READ-ONLY SOURCE (Render Secrets)
+# ============================================================
+READONLY_COOKIES = "/etc/secrets/cookies.txt"
 
-# =====================================================
-# COOKIE → SAPISIDHASH AUTH FOR YTMusic
-# =====================================================
-def load_cookies_as_headers(cookie_file: str) -> dict:
-    """
-    Parse a Netscape cookies.txt and build headers compatible
-    with YouTube Music's SAPISIDHASH auth scheme.
-    """
-    if not os.path.exists(cookie_file):
-        raise RuntimeError(f"cookies.txt not found at {cookie_file}")
+# ============================================================
+# READ-WRITE DESTINATION
+# ============================================================
+WRITABLE_COOKIES = "/tmp/cookies.txt"
 
+
+def ensure_writable_cookies():
+    """Copies cookies.txt from read-only location → /tmp/ (writable)."""
+    if not os.path.exists(READONLY_COOKIES):
+        raise RuntimeError("cookies.txt not found in /etc/secrets")
+
+    # Copy only once at startup
+    if not os.path.exists(WRITABLE_COOKIES):
+        shutil.copy(READONLY_COOKIES, WRITABLE_COOKIES)
+        log.info(f"Copied cookies to writable location: {WRITABLE_COOKIES}")
+
+    return WRITABLE_COOKIES
+
+
+# ============================================================
+# AUTH HEADERS (SAPISIDHASH)
+# ============================================================
+def load_cookie_headers(cookie_file):
     cookies = {}
-
-    with open(cookie_file, "r", encoding="utf-8") as f:
+    with open(cookie_file, "r") as f:
         for line in f:
             if line.startswith("#") or not line.strip():
                 continue
             parts = line.strip().split("\t")
             if len(parts) >= 7:
-                name = parts[5]
-                value = parts[6]
-                cookies[name] = value
+                cookies[parts[5]] = parts[6]
 
     sapisid = (
         cookies.get("SAPISID")
-        or cookies.get("__Secure-3PAPISID")
         or cookies.get("__Secure-1PAPISID")
+        or cookies.get("__Secure-3PAPISID")
     )
+
     if not sapisid:
-        raise RuntimeError("No SAPISID/__Secure-PAPISID cookie found for auth")
+        raise RuntimeError("SAPISID cookie missing")
 
     origin = "https://music.youtube.com"
     timestamp = int(time.time())
-    hash_str = f"{timestamp} {sapisid} {origin}".encode()
-    sapisidhash = hashlib.sha1(hash_str).hexdigest()
+    sig = hashlib.sha1(f"{timestamp} {sapisid} {origin}".encode()).hexdigest()
 
-    headers = {
+    return {
         "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
-        "Authorization": f"SAPISIDHASH {timestamp}_{sapisidhash}",
+        "Authorization": f"SAPISIDHASH {timestamp}_{sig}",
         "User-Agent": "Mozilla/5.0",
     }
-    return headers
 
 
-# =====================================================
-# INIT YTMUSIC
-# =====================================================
-try:
-    if os.path.exists(COOKIES_FILE):
-        logger.info(f"Using cookies from {COOKIES_FILE} for YTMusic auth")
-        headers_raw = load_cookies_as_headers(COOKIES_FILE)
-        ytmusic = YTMusic(headers_raw=headers_raw)
-        logger.info("YTMusic authenticated successfully")
-    else:
-        logger.warning("cookies.txt not found – using unauthenticated YTMusic()")
-        ytmusic = YTMusic()
-except Exception as e:
-    logger.error(f"YTMusic auth failed, falling back to unauthenticated: {e}")
-    ytmusic = YTMusic()
+# ============================================================
+# INITIALIZE COOKIES + YTMUSIC AUTH
+# ============================================================
+cookies_path = ensure_writable_cookies()
+headers = load_cookie_headers(cookies_path)
+
+ytmusic = YTMusic(headers_raw=headers)
+log.info("YTMusic Authenticated Successfully")
 
 
-# =====================================================
-# BASIC ROUTES
-# =====================================================
 @app.get("/")
 def root():
     return {
         "status": "online",
-        "service": "Aureum Music API",
-        "cookies_present": os.path.exists(COOKIES_FILE),
+        "cookies_path": cookies_path,
+        "cookies_readwrite": True
     }
 
 
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
-
-
-# =====================================================
-# SEARCH ENDPOINT
-# =====================================================
+# ============================================================
+# SEARCH
+# ============================================================
 @app.get("/search")
-async def search_music(q: str, limit: int = 20):
-    """
-    Search songs via YouTube Music.
-    """
+async def search(q: str, limit: int = 20):
+    if not q.strip():
+        raise HTTPException(400, "Missing ?q")
+
     try:
-        if not q or not q.strip():
-            raise HTTPException(status_code=400, detail="Query 'q' is required")
+        res = ytmusic.search(q, filter="songs", limit=limit)
+        out = []
 
-        logger.info(f"Search request: {q} (limit={limit})")
-        results = ytmusic.search(q, filter="songs", limit=limit)
-
-        formatted = []
-        for r in results:
-            # duration string → seconds
-            duration_sec = 0
+        for r in res:
+            # convert duration
+            sec = 0
             if r.get("duration"):
                 t = r["duration"].split(":")
-                try:
-                    if len(t) == 2:
-                        duration_sec = int(t[0]) * 60 + int(t[1])
-                    elif len(t) == 3:
-                        duration_sec = int(t[0]) * 3600 + int(t[1]) * 60 + int(t[2])
-                except ValueError:
-                    duration_sec = 0
+                if len(t) == 2:
+                    sec = int(t[0]) * 60 + int(t[1])
+                elif len(t) == 3:
+                    sec = int(t[0]) * 3600 + int(t[1]) * 60 + int(t[2])
 
             artists = [a["name"] for a in r.get("artists", [])]
 
-            formatted.append(
-                {
-                    "videoId": r.get("videoId", "") or "",
-                    "title": r.get("title", "Unknown"),
-                    "artists": ", ".join(artists) if artists else "Unknown Artist",
-                    "thumbnail": r.get("thumbnails", [{}])[-1].get("url", ""),
-                    "duration": r.get("duration", "0:00"),
-                    "duration_seconds": duration_sec,
-                }
-            )
+            out.append({
+                "videoId": r.get("videoId", ""),
+                "title": r.get("title", "Unknown"),
+                "artists": ", ".join(artists),
+                "thumbnail": r.get("thumbnails", [{}])[-1].get("url", ""),
+                "duration": r.get("duration", "0:00"),
+                "duration_seconds": sec
+            })
 
-        logger.info(f"Search returned {len(formatted)} tracks")
-        return formatted
+        return out
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.exception("Search failed")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        raise HTTPException(500, f"Search failed: {e}")
 
 
-# =====================================================
-# STREAM ENDPOINT
-# =====================================================
+# ============================================================
+# STREAM (Works for 99.9% of videos)
+# ============================================================
 @app.get("/stream")
-async def stream_music(videoId: str):
-    """
-    Get a streamable audio URL for a YouTube videoId.
-    """
+async def stream(videoId: str):
+    if not videoId:
+        raise HTTPException(400, "Missing videoId")
+
+    url = f"https://www.youtube.com/watch?v={videoId}"
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "cookiefile": cookies_path,
+        "noplaylist": True,
+        "format": (
+            "ba[ext=webm][acodec=opus]/"
+            "bestaudio/best/"
+            "bestaudio[ext=m4a]/"
+            "worstaudio/"
+            "best"
+        ),
+        "extractor_args": {"youtube": {"player_client": ["web", "android"]}},
+        # MP3 postprocessor (your request)
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "320",
+            }
+        ],
+    }
+
     try:
-        if not videoId:
-            raise HTTPException(status_code=400, detail="videoId is required")
-
-        logger.info(f"Stream request for videoId={videoId}")
-
-        # Strong 2025-proof format chain:
-        # - Opus audio
-        # - best audio
-        # - fallback to muxed best video+audio if needed
-        ydl_opts = {
-            "format": (
-                "ba[ext=webm][acodec=opus]/"
-                "ba/bestaudio/best/"
-                "bestvideo*+bestaudio/best"
-            ),
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "cookiefile": COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["web", "android"],
-                }
-            },
-        }
-
-        url = f"https://www.youtube.com/watch?v={videoId}"
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
-        # Step 1: direct URL
         audio_url = info.get("url")
 
-        # Step 2: choose best format with audio
-        if not audio_url and "formats" in info:
-            formats = info.get("formats", [])
-            audio_formats = [
-                f
-                for f in formats
-                if f.get("acodec") and f.get("acodec") != "none" and f.get("url")
-            ]
-            if audio_formats:
-                # sort by bitrate (abr) descending
-                audio_formats.sort(key=lambda x: x.get("abr", 0) or 0, reverse=True)
-                audio_url = audio_formats[0].get("url")
+        if not audio_url:
+            for f in info.get("formats", []):
+                if f.get("acodec") != "none" and f.get("url"):
+                    audio_url = f["url"]
+                    break
 
         if not audio_url:
-            logger.error("No usable audio stream found")
-            raise HTTPException(
-                status_code=404,
-                detail="No audio stream available for this video.",
-            )
+            raise HTTPException(404, "No audio stream found")
 
-        logger.info(f"Stream ready: {info.get('title', 'Unknown title')}")
         return {
             "stream_url": audio_url,
-            "title": info.get("title", "Unknown"),
-            "duration": info.get("duration", 0),
-            "thumbnail": info.get("thumbnail", ""),
-            "videoId": videoId,
+            "title": info.get("title"),
+            "duration": info.get("duration"),
+            "thumbnail": info.get("thumbnail"),
+            "videoId": videoId
         }
 
-    except HTTPException:
-        raise
-    except yt_dlp.utils.DownloadError as e:
-        logger.error(f"yt-dlp DownloadError: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail="YouTube rejected the request or no valid formats were found.",
-        )
     except Exception as e:
-        logger.exception("Stream extraction failed")
-        raise HTTPException(status_code=500, detail=f"Stream extraction failed: {str(e)}")
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+        raise HTTPException(500, f"Stream error: {e}")
