@@ -124,23 +124,24 @@ async def stream(videoId: str):
         if not videoId:
             raise HTTPException(400, "videoId is required")
 
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "quiet": True,
-            "no_warnings": True,
-            "extractaudio": False,
-            "noplaylist": True,
-            "cookiefile": COOKIES_FILE,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["web", "android"]
-                }
-            },
+       ydl_opts = {
+    "format": "ba[ext=webm][acodec=opus]/ba/bestaudio/best",
+    "quiet": True,
+    "no_warnings": True,
+    "extractaudio": False,
+    "noplaylist": True,
+    "cookiefile": COOKIES_FILE,
+    "http_headers": {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9",
+    },
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["web", "android"]
         }
+    },
+}
+
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(
